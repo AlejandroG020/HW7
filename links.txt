@@ -1,0 +1,15 @@
+Small Matrices
+https://math.nist.gov/pub/MatrixMarket2/SPARSKIT/fidap/fidap003.mtx.gz
+https://math.nist.gov/pub/MatrixMarket2/SPARSKIT/fidap/fidap004.mtx.gz
+https://math.nist.gov/pub/MatrixMarket2/SPARSKIT/fidap/fidap006.mtx.gz
+
+Medium Matrices
+https://math.nist.gov/pub/MatrixMarket2/SPARSKIT/fidap/fidap011.mtx.gz
+https://math.nist.gov/pub/MatrixMarket2/SPARSKIT/fidap/fidap015.mtx.gz
+https://math.nist.gov/pub/MatrixMarket2/SPARSKIT/fidap/fidap018.mtx.gz
+https://math.nist.gov/pub/MatrixMarket2/SPARSKIT/fidap/fidap019.mtx.gz
+
+Large Matrices
+https://math.nist.gov/pub/MatrixMarket2/misc/cylshell/s3dkq4m2.mtx.gz
+https://math.nist.gov/pub/MatrixMarket2/misc/cylshell/s3dkt3m2.mtx.gz
+https://math.nist.gov/pub/MatrixMarket2/SPARSKIT/fidap/fidapm11.mtx.gz
