@@ -1,114 +1,298 @@
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
 #include <stdbool.h>
+
 #include "matrix.h"
 
 #define EPSILON 1e-7
 
-/* Linear scan value retrieval helper for confirmation matching */
-double get_coo_value(TSparseMatrix *M, unsigned int r, unsigned int c) {
-    if (!M || !M->elements) return 0.0;
-    
-    for (unsigned int i = 0; i < M->nnz; i++) {
-        if ((unsigned int)M->elements[i].r == r && (unsigned int)M->elements[i].c == c) {
-            return M->elements[i].val;
-        }
-    }
-    return 0.0;
+/* Required thread configurations */
+#define NUM_CONFIGS 5
+
+static const int thread_counts[NUM_CONFIGS] = {
+    1, 2, 4, 8, 16
+};
+
+/* Compare COO elements by row, then column */
+static int compare_coo(const void *a, const void *b) {
+    const COOElement *x = (const COOElement *)a;
+    const COOElement *y = (const COOElement *)b;
+
+    if (x->r != y->r)
+        return (x->r > y->r) - (x->r < y->r);
+
+    return (x->c > y->c) - (x->c < y->c);
 }
 
-/* Structural verification driver mapping thread calculation parity */
-bool verify_results(TSparseMatrix *seq, TSparseMatrix *par) {
+/* Verify sequential and parallel results */
+bool verify_results(
+    TSparseMatrix *seq,
+    TSparseMatrix *par
+) {
     if (!seq || !par) {
-        fprintf(stderr, "Error: One or both matrices evaluate to NULL.\n");
+        fprintf(stderr, "ERROR: A result matrix is NULL.\n");
         return false;
     }
 
-    if (seq->nrows != par->nrows || seq->ncols != par->ncols) {
-        fprintf(stderr, "Dimension Mismatch! Sequential: %ux%u, Parallel: %ux%u\n", 
-                seq->nrows, seq->ncols, par->nrows, par->ncols);
+    /* Check matrix dimensions */
+    if (seq->nrows != par->nrows ||
+        seq->ncols != par->ncols) {
+
+        fprintf(stderr, "ERROR: Dimension mismatch.\n");
         return false;
     }
 
-    printf("Verifying matrix elements against ground truth (Tolerance = %e)...\n", EPSILON);
+    /* Both results should have the same number of entries */
+    if (seq->nnz != par->nnz) {
+        fprintf(stderr,
+                "ERROR: NNZ mismatch. Sequential: %u, Parallel: %u\n",
+                seq->nnz, par->nnz);
+        return false;
+    }
 
-    for (unsigned int i = 0; i < seq->nnz; i++) {
-        unsigned int r = seq->elements[i].r;
-        unsigned int c = seq->elements[i].c;
-        double val_seq = seq->elements[i].val;
-        double val_par = get_coo_value(par, r, c);
+    /* Make sure the element arrays exist when needed */
+    if (seq->nnz > 0 &&
+        (!seq->elements || !par->elements)) {
 
-        if (fabs(val_seq - val_par) > EPSILON) {
-            fprintf(stderr, "Mismatch detected at index [%u][%u]! Seq value: %f, Par value: %f\n", 
-                    r, c, val_seq, val_par);
+        fprintf(stderr, "ERROR: Missing COO element array.\n");
+        return false;
+    }
+
+    unsigned int count = seq->nnz;
+
+    /* Create copies so original matrices remain unchanged */
+    COOElement *seq_copy = NULL;
+    COOElement *par_copy = NULL;
+
+    if (count > 0) {
+        seq_copy = malloc(count * sizeof(COOElement));
+        par_copy = malloc(count * sizeof(COOElement));
+
+        if (!seq_copy || !par_copy) {
+            fprintf(stderr, "ERROR: Memory allocation failed.\n");
+            free(seq_copy);
+            free(par_copy);
             return false;
+        }
+
+        for (unsigned int i = 0; i < count; i++) {
+            seq_copy[i] = seq->elements[i];
+            par_copy[i] = par->elements[i];
+        }
+
+        /* Sort both matrices into the same coordinate order */
+        qsort(seq_copy, count, sizeof(COOElement), compare_coo);
+        qsort(par_copy, count, sizeof(COOElement), compare_coo);
+    }
+
+    printf("Checking %u nonzero entries...\n", count);
+
+    bool success = true;
+
+    for (unsigned int i = 0; i < count; i++) {
+
+        COOElement s = seq_copy[i];
+        COOElement p = par_copy[i];
+
+        /* Check valid coordinates */
+        if (s.r < 0 || p.r < 0 ||
+            s.c < 0 || p.c < 0 ||
+            (unsigned int)s.r >= seq->nrows ||
+            (unsigned int)p.r >= par->nrows ||
+            (unsigned int)s.c >= seq->ncols ||
+            (unsigned int)p.c >= par->ncols) {
+
+            fprintf(stderr,
+                    "ERROR: Invalid coordinate at entry %u.\n", i);
+
+            success = false;
+            break;
+        }
+
+        /* Detect duplicate coordinates */
+        if (i > 0 &&
+            (s.r == seq_copy[i - 1].r &&
+             s.c == seq_copy[i - 1].c)) {
+
+            fprintf(stderr,
+                    "ERROR: Duplicate sequential coordinate [%d][%d].\n",
+                    s.r, s.c);
+
+            success = false;
+            break;
+        }
+
+        if (i > 0 &&
+            (p.r == par_copy[i - 1].r &&
+             p.c == par_copy[i - 1].c)) {
+
+            fprintf(stderr,
+                    "ERROR: Duplicate parallel coordinate [%d][%d].\n",
+                    p.r, p.c);
+
+            success = false;
+            break;
+        }
+
+        /* Check that coordinates match */
+        if (s.r != p.r || s.c != p.c) {
+            fprintf(stderr,
+                    "ERROR: Coordinate mismatch.\n"
+                    "Sequential: [%d][%d]\n"
+                    "Parallel:   [%d][%d]\n",
+                    s.r, s.c, p.r, p.c);
+
+            success = false;
+            break;
+        }
+
+        /* Check floating-point values */
+        if (!isfinite(s.val) || !isfinite(p.val) ||
+            fabs(s.val - p.val) > EPSILON) {
+
+            fprintf(stderr,
+                    "ERROR: Value mismatch at [%d][%d].\n"
+                    "Sequential: %.12f\n"
+                    "Parallel:   %.12f\n",
+                    s.r, s.c, s.val, p.val);
+
+            success = false;
+            break;
         }
     }
 
-    for (unsigned int i = 0; i < par->nnz; i++) {
-        unsigned int r = par->elements[i].r;
-        unsigned int c = par->elements[i].c;
-        double val_par = par->elements[i].val;
-        double val_seq = get_coo_value(seq, r, c);
+    free(seq_copy);
+    free(par_copy);
 
-        if (fabs(val_seq - val_par) > EPSILON) {
-            fprintf(stderr, "Phantom mismatch detected at index [%u][%u]! Seq value: %f, Par value: %f\n", 
-                    r, c, val_seq, val_par);
-            return false;
-        }
-    }
-
-    return true;
+    return success;
 }
 
+/* Main verification and concurrency stress testing */
 int main(int argc, char *argv[]) {
-    if (argc < 4) {
-        fprintf(stderr, "Usage: %s <MatrixA.mtx> <MatrixB.mtx> <num_threads>\n", argv[0]);
+
+    if (argc != 3) {
+        fprintf(stderr,
+                "Usage: %s <MatrixA.mtx> <MatrixB.mtx>\n",
+                argv[0]);
         return EXIT_FAILURE;
     }
 
     const char *fileA = argv[1];
     const char *fileB = argv[2];
-    int num_threads = atoi(argv[3]);
 
-    if (num_threads <= 0) {
-        fprintf(stderr, "Error: Thread allocation must be a positive integer.\n");
-        return EXIT_FAILURE;
-    }
+    printf("========================================\n");
+    printf("       SPARSE MATRIX VERIFICATION\n");
+    printf("========================================\n");
 
-    printf("Loading sparse datasets into memory structures...\n");
+    /* Load input matrices */
+    printf("\nLoading input matrices...\n");
+
     TSparseMatrix *A = read_coo_matrix(fileA);
     TSparseMatrix *B = read_coo_matrix(fileB);
 
     if (!A || !B) {
-        fprintf(stderr, "Error loading input matrices.\n");
+        fprintf(stderr, "ERROR: Failed to load matrices.\n");
+
         free_sparse_matrix(A);
         free_sparse_matrix(B);
+
         return EXIT_FAILURE;
     }
 
-    printf("Matrix A Loaded: %u x %u (%u NNZ)\n", A->nrows, A->ncols, A->nnz);
-    printf("Matrix B Loaded: %u x %u (%u NNZ)\n", B->nrows, B->ncols, B->nnz);
+    printf("Matrix A: %u x %u | NNZ: %u\n",
+           A->nrows, A->ncols, A->nnz);
 
-    printf("Executing single-threaded baseline matrix calculation...\n");
+    printf("Matrix B: %u x %u | NNZ: %u\n",
+           B->nrows, B->ncols, B->nnz);
+
+    /* Check multiplication compatibility */
+    if (A->ncols != B->nrows) {
+        fprintf(stderr,
+                "ERROR: Matrix dimensions are incompatible.\n");
+
+        free_sparse_matrix(A);
+        free_sparse_matrix(B);
+
+        return EXIT_FAILURE;
+    }
+
+    /* Calculate sequential ground truth */
+    printf("\nRunning sequential baseline...\n");
+
     TSparseMatrix *res_seq = spmm_sequential(A, B);
 
-    printf("Executing parallel multi-core engine with %d threads...\n", num_threads);
-    TSparseMatrix *res_par = spmm_parallel(A, B, num_threads);
+    if (!res_seq) {
+        fprintf(stderr,
+                "ERROR: Sequential multiplication failed.\n");
 
-    bool success = verify_results(res_seq, res_par);
+        free_sparse_matrix(A);
+        free_sparse_matrix(B);
 
-    free_sparse_matrix(A);
-    free_sparse_matrix(B);
-    free_sparse_matrix(res_seq);
-    free_sparse_matrix(res_par);
-
-    if (success) {
-        printf("\n>> SUCCESS: Multithreaded execution calculations mirror structural ground truth flawlessly!\n");
-        return EXIT_SUCCESS;
-    } else {
-        printf("\n>> FAILURE: Discrepancy errors discovered between thread processing executions.\n");
         return EXIT_FAILURE;
     }
+
+    printf("Sequential calculation completed.\n");
+
+    bool all_passed = true;
+
+    /* Test all required thread configurations */
+    printf("\n========================================\n");
+    printf("       CONCURRENCY STRESS TEST\n");
+    printf("========================================\n");
+
+    for (int i = 0; i < NUM_CONFIGS; i++) {
+
+        int threads = thread_counts[i];
+
+        printf("\n----------------------------------------\n");
+        printf("Testing with %d thread(s)...\n", threads);
+        printf("----------------------------------------\n");
+
+        TSparseMatrix *res_par =
+            spmm_parallel(A, B, threads);
+
+        if (!res_par) {
+            fprintf(stderr,
+                    "FAILURE: Parallel calculation failed "
+                    "with %d threads.\n",
+                    threads);
+
+            all_passed = false;
+            continue;
+        }
+
+        bool passed = verify_results(res_seq, res_par);
+
+        if (passed) {
+            printf("PASS: %d thread(s) produced correct results.\n",
+                   threads);
+        } else {
+            printf("FAIL: %d thread(s) produced incorrect results.\n",
+                   threads);
+
+            all_passed = false;
+        }
+
+        free_sparse_matrix(res_par);
+    }
+
+    /* Final summary */
+    printf("\n========================================\n");
+
+    if (all_passed) {
+        printf("SUCCESS: ALL THREAD CONFIGURATIONS PASSED!\n");
+    } else {
+        printf("FAILURE: ONE OR MORE TESTS FAILED.\n");
+    }
+
+    printf("========================================\n");
+
+    /* Release all allocated memory */
+    free_sparse_matrix(res_seq);
+    free_sparse_matrix(A);
+    free_sparse_matrix(B);
+
+    return all_passed ? EXIT_SUCCESS : EXIT_FAILURE;
 }
