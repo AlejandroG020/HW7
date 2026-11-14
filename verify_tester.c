@@ -1,8 +1,8 @@
-
 #include <stdio.h>
 #include <stdlib.h>
 #include <math.h>
 #include <stdbool.h>
+#include <time.h> // Added for timing
 
 #include "matrix.h"
 
@@ -14,6 +14,13 @@
 static const int thread_counts[NUM_CONFIGS] = {
     1, 2, 4, 8, 16
 };
+
+/* Stopwatch function */
+static double now_seconds(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (double)ts.tv_sec + (double)ts.tv_nsec / 1e9;
+}
 
 /* Compare COO elements by row, then column */
 static int compare_coo(const void *a, const void *b) {
@@ -221,7 +228,9 @@ int main(int argc, char *argv[]) {
     /* Calculate sequential ground truth */
     printf("\nRunning sequential baseline...\n");
 
+    double start = now_seconds();
     TSparseMatrix *res_seq = spmm_sequential(A, B);
+    double seq_time = now_seconds() - start;
 
     if (!res_seq) {
         fprintf(stderr,
@@ -233,7 +242,7 @@ int main(int argc, char *argv[]) {
         return EXIT_FAILURE;
     }
 
-    printf("Sequential calculation completed.\n");
+    printf("Sequential Time: %.6f seconds\n", seq_time);
 
     bool all_passed = true;
 
@@ -241,17 +250,17 @@ int main(int argc, char *argv[]) {
     printf("\n========================================\n");
     printf("       CONCURRENCY STRESS TEST\n");
     printf("========================================\n");
+    printf("%8s %15s %12s %10s\n", "Threads", "Time (seconds)", "Speedup", "Status");
+    printf("----------------------------------------------------\n");
 
     for (int i = 0; i < NUM_CONFIGS; i++) {
 
         int threads = thread_counts[i];
 
-        printf("\n----------------------------------------\n");
-        printf("Testing with %d thread(s)...\n", threads);
-        printf("----------------------------------------\n");
-
+        start = now_seconds();
         TSparseMatrix *res_par =
             spmm_parallel(A, B, threads);
+        double par_time = now_seconds() - start;
 
         if (!res_par) {
             fprintf(stderr,
@@ -264,13 +273,12 @@ int main(int argc, char *argv[]) {
         }
 
         bool passed = verify_results(res_seq, res_par);
+        double speedup = seq_time / par_time;
 
         if (passed) {
-            printf("PASS: %d thread(s) produced correct results.\n",
-                   threads);
+            printf("%8d %15.6f %12.3fx %10s\n", threads, par_time, speedup, "PASS");
         } else {
-            printf("FAIL: %d thread(s) produced incorrect results.\n",
-                   threads);
+            printf("%8d %15.6f %12.3fx %10s\n", threads, par_time, speedup, "FAIL");
 
             all_passed = false;
         }
